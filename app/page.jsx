@@ -103,6 +103,7 @@ export default function Home() {
             headers,
           });
           const data = await res.json();
+          console.log(data)
           if (data && data.status) {
             setStatus(data.status);
           }

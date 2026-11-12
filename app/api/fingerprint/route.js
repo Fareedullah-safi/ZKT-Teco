@@ -23,6 +23,7 @@ export async function GET(req) {
       },
     });
     const data = await res.json();
+    console.log(data)
     return NextResponse.json(data, {status: res.status});
   } catch (err) {
     return NextResponse.json(
@@ -71,6 +72,7 @@ export async function POST(req) {
     });
 
     const data = await res.json();
+    console.log(data)
     return NextResponse.json(data, {status: res.status});
   } catch (err) {
     return NextResponse.json(
