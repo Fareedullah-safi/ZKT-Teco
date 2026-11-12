@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import {useEffect, useState} from "react";
 
 const STORAGE_KEY = "zk9500-user-profiles-v1";
 
@@ -21,7 +21,8 @@ function formatDate(isoString) {
 }
 
 export default function Home() {
-  const [form, setForm] = useState({ ...INITIAL_FORM });
+  const [bridgeUrl, setBridgeUrl] = useState("http://127.0.0.1:8765");
+  const [form, setForm] = useState({...INITIAL_FORM});
   const [profiles, setProfiles] = useState([]);
   const [storageReady, setStorageReady] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -29,7 +30,6 @@ export default function Home() {
   const [matchedProfile, setMatchedProfile] = useState(null);
   const [matchResult, setMatchResult] = useState(null);
 
-  // 1. Load profiles from localStorage when page opens
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem(STORAGE_KEY);
@@ -39,34 +39,30 @@ export default function Home() {
           setProfiles(parsed);
         }
       }
-    } catch {
-      console.error("Could not read from localStorage");
+    } catch (err) {
+      console.error("Could not read from localStorage:", err);
     } finally {
       setStorageReady(true);
     }
   }, []);
 
-  // Handle form input changes
   function handleInputChange(e) {
-    const { name, value } = e.target;
-    setForm((prev) => ({ ...prev, [name]: value }));
+    const {name, value} = e.target;
+    setForm((prev) => ({...prev, [name]: value}));
   }
 
-  // Helper to save profiles array to localStorage
   function saveProfilesToStorage(updatedProfiles) {
     setProfiles(updatedProfiles);
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedProfiles));
-    } catch {
-      console.error("Failed to save to localStorage");
+    } catch (err) {
+      console.error("Failed to save to localStorage:", err);
     }
   }
 
-  // 2. Main Fingerprint Operations (Health, Enroll, Identify)
   async function runAction(action) {
     const enteredId = form.subjectId.trim();
 
-    // Validation for Enrollment
     if (action === "enroll") {
       if (!enteredId) {
         setStatus("Please enter a User / Customer ID before enrolling.");
@@ -82,7 +78,6 @@ export default function Home() {
     setMatchedProfile(null);
     setMatchResult(null);
 
-    // Initial Status Message
     if (action === "health") {
       setStatus("Checking fingerprint reader connection...");
     } else if (action === "enroll") {
@@ -94,11 +89,19 @@ export default function Home() {
     let isPolling = action !== "health";
     let pollInterval = null;
 
-    // Live status polling during scanning
+    // Send the user's specific bridge URL in custom header
+    const headers = {
+      "Content-Type": "application/json",
+      "x-bridge-url": bridgeUrl.trim(),
+    };
+
     if (isPolling) {
       pollInterval = setInterval(async () => {
         try {
-          const res = await fetch("/api/fingerprint?action=status", { cache: "no-store" });
+          const res = await fetch("/api/fingerprint?action=status", {
+            cache: "no-store",
+            headers,
+          });
           const data = await res.json();
           if (data && data.status) {
             setStatus(data.status);
@@ -111,13 +114,18 @@ export default function Home() {
 
     try {
       let res;
+
       if (action === "health") {
-        res = await fetch("/api/fingerprint", { cache: "no-store" });
+        res = await fetch("/api/fingerprint", {
+          cache: "no-store",
+          headers,
+        });
       } else {
-        const body = action === "enroll" ? { action: "enroll", subjectId: enteredId } : { action: "identify" };
+        const body =
+          action === "enroll" ? {action: "enroll", subjectId: enteredId} : {action: "identify"};
         res = await fetch("/api/fingerprint", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify(body),
         });
       }
@@ -128,17 +136,13 @@ export default function Home() {
         throw new Error(data.error || "Operation failed.");
       }
 
-      // Handle Reader Health Check
       if (action === "health") {
         if (data.readerConnected) {
           setStatus(`Reader Connected! Found ${data.deviceCount} device(s).`);
         } else {
-          setStatus("Bridge is running, but fingerprint reader is disconnected.");
+          setStatus("Java Bridge is running, but USB reader is disconnected.");
         }
-      }
-
-      // Handle Fingerprint Enrollment
-      else if (action === "enroll") {
+      } else if (action === "enroll") {
         if (data.enrolled) {
           const now = new Date().toISOString();
           const newProfile = {
@@ -153,17 +157,13 @@ export default function Home() {
             lastIdentifiedAt: null,
           };
 
-          // Update existing or add new profile
           const updated = [newProfile, ...profiles.filter((p) => p.subjectId !== enteredId)];
           saveProfilesToStorage(updated);
 
-          setStatus(`Successfully enrolled fingerprint for ${enteredId}! Data stored.`);
-          setForm({ ...INITIAL_FORM }); // Clear form fields after enrollment
+          setStatus(`Successfully enrolled fingerprint for ${enteredId}! Profile saved.`);
+          setForm({...INITIAL_FORM});
         }
-      }
-
-      // Handle Fingerprint Identification & Data Fetching
-      else if (action === "identify") {
+      } else if (action === "identify") {
         setMatchResult(data);
 
         if (data.matched && data.subjectId) {
@@ -172,16 +172,17 @@ export default function Home() {
 
           if (userProfile) {
             const now = new Date().toISOString();
-            const updatedProfile = { ...userProfile, lastIdentifiedAt: now };
+            const updatedProfile = {...userProfile, lastIdentifiedAt: now};
 
-            // Update last identified time in localStorage
             const updatedList = profiles.map((p) => (p.subjectId === foundId ? updatedProfile : p));
             saveProfilesToStorage(updatedList);
 
             setMatchedProfile(updatedProfile);
             setStatus(`MATCH FOUND! Showing stored data for ID: ${foundId}`);
           } else {
-            setStatus(`Fingerprint matched ID "${foundId}", but no profile data was found in local storage.`);
+            setStatus(
+              `Fingerprint matched ID "${foundId}", but no profile data was found in local storage.`
+            );
           }
         } else {
           setStatus("No matching fingerprint found. Please enroll first.");
@@ -198,12 +199,30 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-slate-100 p-6 text-slate-900">
       <div className="mx-auto max-w-3xl space-y-6">
-        
         {/* Header */}
         <div className="rounded-2xl bg-white p-6 shadow-sm border border-slate-200">
           <h1 className="text-2xl font-bold text-slate-800">ZK9500 Fingerprint System</h1>
           <p className="text-sm text-slate-600 mt-1">
             Enroll user data with fingerprint, or scan finger to retrieve stored details.
+          </p>
+        </div>
+
+        {/* Bridge URL Input */}
+        <div className="rounded-xl bg-white border border-slate-200 p-4 shadow-sm">
+          <label className="block text-xs font-bold uppercase text-slate-500 mb-1">
+            Scanner Bridge URL for this PC
+          </label>
+          <input
+            type="text"
+            value={bridgeUrl}
+            onChange={(e) => setBridgeUrl(e.target.value)}
+            disabled={busy}
+            placeholder="http://127.0.0.1:8765 or https://your-tunnel.loca.lt"
+            className="w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none font-mono"
+          />
+          <p className="text-xs text-slate-500 mt-1">
+            Each user sets their own bridge/tunnel URL here. (Default:{" "}
+            <code>http://127.0.0.1:8765</code>).
           </p>
         </div>
 
@@ -215,10 +234,12 @@ export default function Home() {
         {/* Form: Add / Enroll User Data */}
         <section className="rounded-2xl bg-white p-6 shadow-sm border border-slate-200">
           <h2 className="text-lg font-bold mb-4 text-slate-800">1. Enroll New User Data</h2>
-          
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-semibold text-slate-700">User / Customer ID *</label>
+              <label className="block text-sm font-semibold text-slate-700">
+                User / Customer ID *
+              </label>
               <input
                 type="text"
                 name="subjectId"
@@ -296,7 +317,9 @@ export default function Home() {
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-sm font-semibold text-slate-700">Notes / Description</label>
+              <label className="block text-sm font-semibold text-slate-700">
+                Notes / Description
+              </label>
               <textarea
                 name="notes"
                 value={form.notes}
@@ -309,7 +332,6 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Action Buttons */}
           <div className="mt-6 flex flex-wrap gap-3">
             <button
               type="button"
@@ -333,7 +355,9 @@ export default function Home() {
 
         {/* Section 2: Identify via Fingerprint */}
         <section className="rounded-2xl bg-white p-6 shadow-sm border border-slate-200">
-          <h2 className="text-lg font-bold mb-2 text-slate-800">2. Fetch User Data with Fingerprint</h2>
+          <h2 className="text-lg font-bold mb-2 text-slate-800">
+            2. Fetch User Data with Fingerprint
+          </h2>
           <p className="text-sm text-slate-600 mb-4">
             Click below and place finger on scanner to display the user&apos;s full profile.
           </p>
@@ -380,7 +404,9 @@ export default function Home() {
               </div>
 
               <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">Nationality</span>
+                <span className="text-xs text-slate-500 uppercase font-bold block">
+                  Nationality
+                </span>
                 <p className="font-medium">{matchedProfile.nationality || "Not provided"}</p>
               </div>
 
@@ -390,25 +416,32 @@ export default function Home() {
               </div>
 
               <div className="md:col-span-2">
-                <span className="text-xs text-slate-500 uppercase font-bold block">Notes / Description</span>
+                <span className="text-xs text-slate-500 uppercase font-bold block">
+                  Notes / Description
+                </span>
                 <p className="font-medium bg-white p-3 rounded-lg border border-slate-200 mt-1">
                   {matchedProfile.notes || "No notes available."}
                 </p>
               </div>
 
               <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">Enrolled Date</span>
+                <span className="text-xs text-slate-500 uppercase font-bold block">
+                  Enrolled Date
+                </span>
                 <p className="text-xs text-slate-600">{formatDate(matchedProfile.enrolledAt)}</p>
               </div>
 
               <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">Last Scanned Date</span>
-                <p className="text-xs text-slate-600">{formatDate(matchedProfile.lastIdentifiedAt)}</p>
+                <span className="text-xs text-slate-600 uppercase font-bold block">
+                  Last Scanned Date
+                </span>
+                <p className="text-xs text-slate-600">
+                  {formatDate(matchedProfile.lastIdentifiedAt)}
+                </p>
               </div>
             </div>
           </section>
         )}
-
       </div>
     </main>
   );

@@ -1,69 +1,81 @@
-const bridgeBase = (process.env.FINGERPRINT_BRIDGE_URL || "http://127.0.0.1:8765").replace(
-  /\/+$/,
-  ""
-);
+import {NextResponse} from "next/server";
 
-async function forward(path, method, body) {
+export async function GET(req) {
+  const {searchParams} = new URL(req.url);
+  const action = searchParams.get("action");
+
+  // Get the bridge URL sent from this specific user's browser
+  const customBridge = req.headers.get("x-bridge-url");
+  const bridgeUrl = (
+    customBridge ||
+    process.env.FINGERPRINT_BRIDGE_URL ||
+    "http://127.0.0.1:8765"
+  ).replace(/\/+$/, "");
+
+  const path = action === "status" ? "/status" : "/health";
+
   try {
-    const bridgeResponse = await fetch(`${bridgeBase}${path}`, {
-      method,
+    const res = await fetch(`${bridgeUrl}${path}`, {
       cache: "no-store",
-      ...(body === undefined
-        ? {}
-        : {
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(body),
-          }),
-    });
-
-    const text = await bridgeResponse.text();
-
-    return new Response(text || null, {
-      status: bridgeResponse.status,
       headers: {
-        "Content-Type": bridgeResponse.headers.get("content-type") || "application/json",
+        "Content-Type": "application/json",
+        "bypass-tunnel-reminder": "true",
       },
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-
-    return Response.json(
+    const data = await res.json();
+    return NextResponse.json(data, {status: res.status});
+  } catch (err) {
+    return NextResponse.json(
       {
-        error: `Cannot reach the Java fingerprint bridge at ${bridgeBase}. Make sure it is running. ${message}`,
+        error: `Cannot reach Java Bridge at ${bridgeUrl}. Make sure run-server.bat is running. (${err.message})`,
       },
       {status: 502}
     );
   }
 }
 
-export async function GET(request) {
-  const action = new URL(request.url).searchParams.get("action");
-
-  return forward(action === "status" ? "/status" : "/health", "GET");
-}
-
-export async function POST(request) {
-  let data;
+export async function POST(req) {
+  const customBridge = req.headers.get("x-bridge-url");
+  const bridgeUrl = (
+    customBridge ||
+    process.env.FINGERPRINT_BRIDGE_URL ||
+    "http://127.0.0.1:8765"
+  ).replace(/\/+$/, "");
 
   try {
-    data = await request.json();
-  } catch {
-    return Response.json({error: "Invalid JSON request."}, {status: 400});
-  }
+    const body = await req.json();
+    let path = "";
+    let payload = {};
 
-  if (data?.action === "enroll") {
-    const subjectId = String(data.subjectId || "").trim();
-
-    if (!subjectId) {
-      return Response.json({error: "Enter a subject ID before enrolling."}, {status: 400});
+    if (body.action === "enroll") {
+      if (!body.subjectId) {
+        return NextResponse.json({error: "Missing subjectId"}, {status: 400});
+      }
+      path = "/v1/enroll";
+      payload = {subjectId: body.subjectId};
+    } else if (body.action === "identify") {
+      path = "/v1/identify";
+      payload = {};
+    } else {
+      return NextResponse.json({error: "Invalid action"}, {status: 400});
     }
 
-    return forward("/v1/enroll", "POST", {subjectId});
-  }
+    const res = await fetch(`${bridgeUrl}${path}`, {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "bypass-tunnel-reminder": "true",
+      },
+      body: JSON.stringify(payload),
+    });
 
-  if (data?.action === "identify") {
-    return forward("/v1/identify", "POST", {});
+    const data = await res.json();
+    return NextResponse.json(data, {status: res.status});
+  } catch (err) {
+    return NextResponse.json(
+      {error: `Cannot reach Java Bridge at ${bridgeUrl}. (${err.message})`},
+      {status: 502}
+    );
   }
-
-  return Response.json({error: "Unknown fingerprint action."}, {status: 400});
 }
