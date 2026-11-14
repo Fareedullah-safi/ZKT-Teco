@@ -1,6 +1,7 @@
 import {NextResponse} from "next/server";
 import dbConnect from "../../../Lib/mongoDB";
 import Customer from "../../../Models/Customer";
+// export const dynamic = "force-dynamic";
 
 // ---------- config ----------
 const DEFAULT_BRIDGE_URL = process.env.NEXT_PUBLIC_BRIDGE_URL || "http://127.0.0.1:8765";
