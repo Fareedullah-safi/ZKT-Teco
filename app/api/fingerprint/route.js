@@ -1,144 +1,140 @@
 import {NextResponse} from "next/server";
 import dbConnect from "../../../Lib/mongoDB";
 import Customer from "../../../Models/Customer";
-// export const dynamic = "force-dynamic";
 
 // ---------- config ----------
-const DEFAULT_BRIDGE_URL = process.env.NEXT_PUBLIC_BRIDGE_URL || "http://127.0.0.1:8765";
-const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || ""; // only set if the bridge has the same BRIDGE_TOKEN
-
 const HEALTH_TIMEOUT_MS = 8000;
 const SYNC_TIMEOUT_MS = 15000;
-const SCAN_TIMEOUT_MS = 70000; // bridge waits up to 20s x 3 touches + lifts
+const SCAN_TIMEOUT_MS = 70000; // enroll (3 touches)
 const IDENTIFY_TIMEOUT_MS = 20000;
 
-const ALLOWED_HOSTS = new Set([
-  "127.0.0.1",
-  "localhost",
-  "[::1]",
-  ...(process.env.BRIDGE_ALLOWED_HOSTS || "")
-    .split(",")
-    .map((h) => h.trim())
-    .filter(Boolean),
-]);
-try {
-  ALLOWED_HOSTS.add(new URL(DEFAULT_BRIDGE_URL).hostname);
-} catch {}
-
 // ---------- helpers ----------
-const str = (v) => String(v ?? "").trim();
+function respond(status, code, message, extra = {}) {
+  return NextResponse.json({status: "error", code, message, error: message, ...extra}, {status});
+}
 
-const pickTemplate = (d) =>
-  d?.templateBase64 || d?.template || d?.fingerprintTemplate || d?.data?.template || "";
-
-function getBridgeUrl(req) {
-  const raw = req.headers.get("x-bridge-url");
-  if (!raw) return DEFAULT_BRIDGE_URL;
-  try {
-    const u = new URL(raw);
-    if (!["http:", "https:"].includes(u.protocol)) return null;
-    if (u.username || u.password) return null;
-    if (!ALLOWED_HOSTS.has(u.hostname)) return null;
-    return u.origin;
-  } catch {
-    return null;
+// The bridge link comes ONLY from the page's input box (x-bridge-url header).
+function resolveBridge(request) {
+  const raw = (request.headers.get("x-bridge-url") || "").trim();
+  if (!raw) {
+    return {
+      error: respond(
+        400,
+        "BRIDGE_URL_MISSING",
+        "Type the connection link in the box at the top of the page."
+      ),
+    };
   }
+
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return {error: respond(400, "INVALID_BRIDGE_URL", "The connection link is not a valid URL.")};
+  }
+
+  const host = u.hostname;
+  const isLocal = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    return {error: respond(400, "INVALID_BRIDGE_URL", "The link must start with https://")};
+  }
+  if (u.protocol === "http:" && !isLocal) {
+    return {error: respond(400, "INVALID_BRIDGE_URL", "Use an https:// link for a remote bridge.")};
+  }
+  if (host === "0.0.0.0" || /^169\.254\./.test(host)) {
+    return {error: respond(400, "INVALID_BRIDGE_URL", "That address is not allowed.")};
+  }
+
+  // origin drops any path (e.g. if someone pastes .../health)
+  return {url: u.origin};
 }
 
-function bridgeHeaders() {
-  const h = {"Content-Type": "application/json"};
-  if (BRIDGE_TOKEN) h["X-Bridge-Token"] = BRIDGE_TOKEN;
-  return h;
-}
-
-async function bridgeFetch(url, path, {method = "POST", body, timeout}) {
-  const res = await fetch(`${url}${path}`, {
+async function bridgeFetch(baseUrl, path, {method = "GET", body, timeout}) {
+  const res = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: bridgeHeaders(),
-    body: body ? JSON.stringify(body) : undefined,
+    headers: {
+      "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "1",
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
     signal: AbortSignal.timeout(timeout),
   });
-  const data = await res.json().catch(() => ({}));
+
+  const text = await res.text();
+  let data = {};
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = {raw: text.slice(0, 200)};
+  }
   return {res, data};
 }
 
-// Forward the bridge's own error (code, message, status) to the page
 function bridgeError(res, data, fallback) {
-  return NextResponse.json(
-    {
-      status: "error",
-      code: data.code,
-      message: data.message || data.error || fallback,
-      ...(data.existingSubjectId ? {existingSubjectId: data.existingSubjectId} : {}),
-    },
-    {status: res.status >= 400 ? res.status : 422}
-  );
+  const message = data?.message || data?.error || fallback;
+  const code = data?.code || "BRIDGE_ERROR";
+  const status = res.status >= 400 && res.status < 600 ? res.status : 502;
+  return respond(status, code, message);
 }
 
 function errorResponse(err) {
   if (err?.name === "TimeoutError" || err?.name === "AbortError") {
-    return NextResponse.json(
-      {
-        status: "error",
-        code: "SCAN_TIMEOUT",
-        message: "Scan timed out. Place your finger and try again.",
-      },
-      {status: 504}
-    );
+    return respond(504, "SCAN_TIMEOUT", "The scanner took too long to respond. Try again.");
   }
-  console.error("[fingerprint]", err?.cause?.code || err?.message);
-  return NextResponse.json({status: "error", message: err.message}, {status: 500});
+  const reason = err?.cause?.code || err?.message || "Unknown error";
+  return respond(503, "BRIDGE_UNREACHABLE", reason);
 }
 
-const invalidUrl = () =>
-  NextResponse.json(
-    {status: "error", code: "INVALID_BRIDGE_URL", message: "Bridge URL not allowed"},
-    {status: 400}
-  );
-
-// ---------- GET: health ----------
-export async function GET(req) {
-  const url = getBridgeUrl(req);
-  if (!url) return invalidUrl();
+// ---------- GET: bridge status ----------
+export async function GET(request) {
+  const bridge = resolveBridge(request);
+  if (bridge.error) {
+    return NextResponse.json(
+      {status: "offline", code: "BRIDGE_UNREACHABLE", message: "No valid connection link."},
+      {status: 503}
+    );
+  }
 
   try {
-    const res = await fetch(`${url}/health`, {
-      headers: BRIDGE_TOKEN ? {"X-Bridge-Token": BRIDGE_TOKEN} : undefined,
-      cache: "no-store",
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json().catch(() => ({}));
-    return NextResponse.json({status: "online", bridge: data});
-  } catch (error) {
-    console.error("[health]", error?.cause?.code || error.message);
+    const {res, data} = await bridgeFetch(bridge.url, "/health", {timeout: HEALTH_TIMEOUT_MS});
+    if (res.ok) return NextResponse.json({status: "online", bridge: data});
+    return NextResponse.json(
+      {status: "offline", code: "BRIDGE_UNREACHABLE", message: `Bridge answered ${res.status}`},
+      {status: 503}
+    );
+  } catch (err) {
     return NextResponse.json(
       {
         status: "offline",
         code: "BRIDGE_UNREACHABLE",
-        message: error?.cause?.code || error.message,
+        message: err?.cause?.code || err?.message || "Unreachable",
       },
       {status: 503}
     );
   }
 }
 
-// ---------- POST ----------
-export async function POST(req) {
-  const url = getBridgeUrl(req);
-  if (!url) return invalidUrl();
+// ---------- POST: sync / enroll / identify ----------
+export async function POST(request) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return respond(400, "BAD_REQUEST", "Invalid JSON body.");
+  }
+
+  const bridge = resolveBridge(request);
+  if (bridge.error) return bridge.error;
+
+  const action = body?.action;
 
   try {
-    const body = await req.json();
-    const {action} = body;
-
-    // ----- sync -----
+    // ----- SYNC: MongoDB -> bridge memory -----
     if (action === "sync") {
       await dbConnect();
-      const customers = await Customer.find({
-        fingerprintTemplate: {$nin: [null, ""]},
-      })
+      const customers = await Customer.find({fingerprintTemplate: {$exists: true, $ne: ""}})
         .select("subjectId fingerprintTemplate")
         .lean();
 
@@ -147,56 +143,59 @@ export async function POST(req) {
         templateBase64: c.fingerprintTemplate,
       }));
 
-      const {res, data} = await bridgeFetch(url, "/v1/sync", {
+      const {res, data} = await bridgeFetch(bridge.url, "/v1/sync", {
+        method: "POST",
         body: {records},
         timeout: SYNC_TIMEOUT_MS,
       });
-      if (!res.ok) return bridgeError(res, data, "Sync failed");
-      return NextResponse.json(data);
+      if (!res.ok) return bridgeError(res, data, "Sync failed.");
+
+      return NextResponse.json({
+        status: "success",
+        count: data.synced ?? records.length,
+        failed: data.failed ?? 0,
+      });
     }
 
-    // ----- enroll -----
+    // ----- ENROLL -----
     if (action === "enroll") {
-      const subjectId = str(body.subjectId);
-      const fullName = str(body.fullName || body.name);
-
+      const subjectId = String(body.subjectId || "").trim();
+      const fullName = String(body.fullName || body.name || "").trim();
       if (!subjectId || !fullName) {
-        return NextResponse.json(
-          {status: "error", message: "Subject ID and Full Name are required"},
-          {status: 400}
-        );
+        return respond(400, "MISSING_FIELDS", "Subject ID and Full Name are required.");
       }
 
       await dbConnect();
 
-      // Block only if this ID already has a finger saved
-      const existing = await Customer.findOne({subjectId}).select("fingerprintTemplate");
+      const existing = await Customer.findOne({subjectId}).select("fingerprintTemplate").lean();
       if (existing?.fingerprintTemplate) {
-        return NextResponse.json(
-          {status: "error", message: "This Subject ID is already registered in MongoDB"},
-          {status: 409}
-        );
+        return respond(409, "SUBJECT_EXISTS", "That Subject ID is already enrolled.");
       }
 
-      const {res, data} = await bridgeFetch(url, "/v1/enroll", {
+      const {res, data} = await bridgeFetch(bridge.url, "/v1/enroll", {
+        method: "POST",
         body: {subjectId},
         timeout: SCAN_TIMEOUT_MS,
       });
-      console.log(
-        "[enroll] bridge replied:",
-        JSON.stringify({
-          ...data,
-          templateBase64: data.templateBase64 ? "<hidden>" : undefined,
-        }).slice(0, 300)
-      );
 
-      const ok =
+      const template = data.templateBase64 || data.template || data.fingerprintTemplate || "";
+      console.log("[enroll] bridge replied:", {
+        ...data,
+        templateBase64: data.templateBase64 ? "<hidden>" : undefined,
+        template: data.template ? "<hidden>" : undefined,
+      });
+
+      const success =
         res.ok && (data.status === "success" || data.enrolled === true || data.success === true);
-      if (!ok) return bridgeError(res, data, "Enrollment failed");
+      if (!success) return bridgeError(res, data, "Enrollment failed.");
 
-      const template = pickTemplate(data);
       if (!template) {
-        console.error("[enroll] bridge gave no template. Keys:", Object.keys(data));
+        console.log("[enroll] bridge gave no template. Keys:", Object.keys(data));
+        return respond(
+          502,
+          "NO_TEMPLATE",
+          "Scanner enrolled, but no template was returned. Nothing was saved."
+        );
       }
 
       const customer = await Customer.findOneAndUpdate(
@@ -204,62 +203,70 @@ export async function POST(req) {
         {
           subjectId,
           fullName,
-          phone: str(body.phone),
-          email: str(body.email),
-          nationality: str(body.nationality),
-          address: str(body.address),
-          notes: str(body.notes),
+          phone: body.phone || "",
+          email: body.email || "",
+          nationality: body.nationality || "",
+          address: body.address || "",
+          notes: body.notes || "",
           fingerprintTemplate: template,
           enrolledAt: new Date(),
         },
-        {new: true, upsert: true, setDefaultsOnInsert: true}
+        {returnDocument: "after", upsert: true, setDefaultsOnInsert: true}
       ).select("-fingerprintTemplate");
 
       return NextResponse.json({
         status: "success",
         subjectId,
-        templateSaved: Boolean(template),
+        templateSaved: true,
         customer,
       });
     }
 
-    // ----- identify -----
+    // ----- IDENTIFY -----
     if (action === "identify") {
-      await dbConnect();
-
-      const {res, data} = await bridgeFetch(url, "/v1/identify", {
+      const {res, data} = await bridgeFetch(bridge.url, "/v1/identify", {
+        method: "POST",
         body: {},
         timeout: IDENTIFY_TIMEOUT_MS,
       });
-      console.log("[identify] bridge replied:", JSON.stringify(data).slice(0, 300));
+      console.log("[identify] bridge replied:", data);
 
-      const matchedId = str(data.subjectId || data.id);
       const matched =
         res.ok &&
-        matchedId &&
+        data.subjectId &&
         (data.status === "success" ||
           data.matched === true ||
           data.identified === true ||
           data.success === true);
+      if (!matched) return bridgeError(res, data, "Fingerprint not recognized.");
 
-      if (!matched) return bridgeError(res, data, "No match found");
-
+      await dbConnect();
       const customer = await Customer.findOneAndUpdate(
-        {subjectId: matchedId},
+        {subjectId: data.subjectId},
         {lastIdentifiedAt: new Date()},
-        {new: true}
+        {returnDocument: "after"}
       ).select("-fingerprintTemplate");
+
+      if (!customer) {
+        return respond(
+          404,
+          "PROFILE_NOT_FOUND",
+          `Finger matched (ID: ${data.subjectId}), but no profile exists in MongoDB.`,
+          {subjectId: data.subjectId}
+        );
+      }
 
       return NextResponse.json({
         status: "success",
-        subjectId: matchedId,
-        score: data.score,
+        subjectId: data.subjectId,
+        score: data.score ?? null,
         customer,
       });
     }
 
-    return NextResponse.json({status: "error", message: "Unknown action"}, {status: 400});
+    return respond(400, "UNKNOWN_ACTION", "Unknown action.");
   } catch (err) {
+    console.error(`[${action}] error:`, err);
     return errorResponse(err);
   }
 }

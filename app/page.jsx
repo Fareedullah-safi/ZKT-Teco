@@ -206,9 +206,8 @@ function formatDate(d) {
   });
 }
 
-// CHANGED: hint now matches the new run-server.bat setup
 const BRIDGE_HINT =
-  "Start the bridge: double-click run-server.bat in the fingerprint-server folder.";
+  "Start run-server.bat, copy the https link from the cloudflared window, and paste it in the box at the top.";
 
 // Exact-code toasts for the route/bridge
 const CODE_TOASTS = {
@@ -252,10 +251,17 @@ const CODE_TOASTS = {
     title: "Scanner Not Connected",
     message: "Unplug USB → wait 3s → replug → restart the Java bridge.",
   },
-  UNAUTHORIZED: {
-    type: "error",
-    title: "Bridge Auth Failed",
-    message: "BRIDGE_TOKEN in .env.local must match the one the Java bridge was started with.",
+  // CHANGED: new — shown when the link box is empty
+  BRIDGE_URL_MISSING: {
+    type: "warning",
+    title: "Connection Link Missing",
+    message: "Paste the https link from the cloudflared window into the box at the top.",
+  },
+  // CHANGED: new — shown when the link is not a valid URL
+  INVALID_BRIDGE_URL: {
+    type: "warning",
+    title: "Invalid Connection Link",
+    message: "The link must be a full address like https://xxxx.trycloudflare.com",
   },
 };
 
@@ -289,7 +295,7 @@ function getErrorToast(data, fallbackTitle = "Error") {
     return {
       type: "error",
       title: "Database Offline",
-      message: "Check MONGODB_URI in .env.local and that MongoDB is running.",
+      message: "Check MONGODB_URI in your environment variables and that MongoDB is running.",
     };
   }
   if (/timeout|timed out|place finger/i.test(raw)) {
@@ -361,10 +367,9 @@ const emptyForm = {
 };
 
 export default function HomePage() {
-  // CHANGED: default comes from .env.local (NEXT_PUBLIC_BRIDGE_URL), still editable
-  const [bridgeUrl, setBridgeUrl] = useState(
-    process.env.NEXT_PUBLIC_BRIDGE_URL || "http://127.0.0.1:8765"
-  );
+  // CHANGED: the link comes only from the input box (no env). Starts empty.
+  const [bridgeUrl, setBridgeUrl] = useState("");
+  const [urlReady, setUrlReady] = useState(false);
   const [connected, setConnected] = useState(null);
   const [activeTab, setActiveTab] = useState("enroll");
   const [form, setForm] = useState(defaultForm);
@@ -391,13 +396,29 @@ export default function HomePage() {
   const headers = useCallback(
     () => ({
       "Content-Type": "application/json",
-      "x-bridge-url": bridgeUrl,
+      "x-bridge-url": bridgeUrl.trim(), // CHANGED: trimmed
     }),
     [bridgeUrl]
   );
 
+  // CHANGED: new — load the last typed link from the browser.
+  // On localhost the box defaults to the local bridge.
+  useEffect(() => {
+    const saved = localStorage.getItem("bridgeUrl");
+    const isLocalPage = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+    setBridgeUrl(saved || (isLocalPage ? "http://127.0.0.1:8765" : ""));
+    setUrlReady(true);
+  }, []);
+
   // Live bridge status
   useEffect(() => {
+    // CHANGED: wait for the saved link, and show Offline if the box is empty
+    if (!urlReady) return;
+    if (!bridgeUrl.trim()) {
+      setConnected(false);
+      return;
+    }
+
     let cancelled = false;
     const check = async () => {
       try {
@@ -420,9 +441,7 @@ export default function HomePage() {
       cancelled = true;
       clearInterval(t);
     };
-  }, [headers]);
-
-  // (CHANGED: removed the unused second `check` function that used `cancelled` out of scope)
+  }, [headers, urlReady, bridgeUrl]); // CHANGED: added urlReady, bridgeUrl
 
   // Auto-sync templates from MongoDB → Java RAM when bridge comes online
   useEffect(() => {
@@ -439,8 +458,8 @@ export default function HomePage() {
         });
         const data = await res.json();
         if (!cancelled) {
-          didSync.current = true;
           if (res.ok) {
+            didSync.current = true; // CHANGED: only mark done when sync really worked
             addToast(
               "info",
               "Templates Synced",
@@ -496,7 +515,6 @@ export default function HomePage() {
 
       // Accept all shapes: { success }, { matched } or { status: "success" }
       const customer = data.customer;
-      // CHANGED: also accept data.status === "success" (what the route returns)
       const ok = res.ok && customer && (data.success || data.matched || data.status === "success");
 
       if (ok) {
@@ -643,10 +661,12 @@ export default function HomePage() {
               value={bridgeUrl}
               onChange={(e) => {
                 setBridgeUrl(e.target.value);
+                localStorage.setItem("bridgeUrl", e.target.value); // CHANGED: remember the link
+                setConnected(null); // CHANGED: re-check the new link before syncing
                 didSync.current = false;
               }}
               className="bg-bgInput border border-white/10 rounded-md text-xs px-3 py-1.5 w-56 font-mono text-slate-200 outline-none focus:border-indigo-500"
-              placeholder="http://127.0.0.1:8765"
+              placeholder="Paste the connection link (https://...)" // CHANGED
             />
             <div
               className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold ${
