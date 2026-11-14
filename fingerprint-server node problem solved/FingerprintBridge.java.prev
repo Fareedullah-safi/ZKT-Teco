@@ -1,0 +1,372 @@
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import com.zkteco.biometric.FingerprintSensorErrorCode;
+import com.zkteco.biometric.FingerprintSensorEx;
+
+public class FingerprintBridge {
+    private static final int PORT = 8765;
+    private static final int TPL_MAX = 2048;
+    private static final long TOUCH_TIMEOUT_MS = 20_000;
+    private static final long LIFT_TIMEOUT_MS = 10_000;
+    private static final long IDENTIFY_TIMEOUT_MS = 10_000;
+    private static final long STARTED_AT = System.currentTimeMillis();
+
+    // Optional shared secret. If BRIDGE_TOKEN is set, requests must send X-Bridge-Token.
+    private static final String TOKEN = System.getenv("BRIDGE_TOKEN");
+
+    private static final Pattern SAFE_ID = Pattern.compile("[A-Za-z0-9_-]{1,64}");
+    private static final Pattern SUBJECT = Pattern.compile("\"subjectId\"\\s*:\\s*\"([^\"]*)\"");
+    private static final Pattern TEMPLATE = Pattern.compile("\"templateBase64\"\\s*:\\s*\"([^\"]*)\"");
+    private static final Pattern RECORD = Pattern.compile("\\{[^{}]*\\}");
+
+    private static final Object HW_LOCK = new Object();
+    private static volatile long dev = 0;
+    private static volatile long db = 0;
+    private static int deviceCount = 0;
+    private static byte[] img = new byte[640 * 480];
+
+    private static volatile String enrollPhase = "idle"; // idle | touch | lift
+    private static volatile int enrollStep = 0;
+
+    // numeric SDK id -> subjectId (a subject can have several ids after re-enrolling)
+    private static final Map<Integer, String> idToSubject = new ConcurrentHashMap<>();
+    private static final Set<String> subjects = ConcurrentHashMap.newKeySet();
+    private static final AtomicInteger counter = new AtomicInteger(1);
+
+    // ------------------------------------------------------------ main
+    public static void main(String[] args) throws Exception {
+        Runtime.getRuntime().addShutdownHook(new Thread(FingerprintBridge::cleanup));
+        initHardware();
+
+        HttpServer server;
+        try {
+            server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), PORT), 0);
+        } catch (java.net.BindException e) {
+            System.err.println("[ERROR] Port " + PORT + " is already in use. Close the old bridge window first.");
+            return;
+        }
+        server.createContext("/health", ex -> run(ex, "GET", FingerprintBridge::health));
+        server.createContext("/v1/enroll", ex -> run(ex, "POST", FingerprintBridge::enroll));
+        server.createContext("/v1/identify", ex -> run(ex, "POST", FingerprintBridge::identify));
+        server.createContext("/v1/sync", ex -> run(ex, "POST", FingerprintBridge::sync));
+        server.setExecutor(Executors.newFixedThreadPool(4));
+        server.start();
+
+        System.out.println("ZK9500 bridge is ready at http://127.0.0.1:" + PORT
+                + ((TOKEN == null || TOKEN.isEmpty()) ? "  (no token)" : "  (token required)"));
+        System.out.println("Keep this window open while testing.");
+    }
+
+    private static void initHardware() {
+        try {
+            if (FingerprintSensorEx.Init() != FingerprintSensorErrorCode.ZKFP_ERR_OK) {
+                System.err.println("[ERROR] SDK Init failed");
+                return;
+            }
+            deviceCount = FingerprintSensorEx.GetDeviceCount();
+            if (deviceCount <= 0) {
+                System.err.println("[WARNING] No scanner found. Close the ZKFinger demo if it is open.");
+                return;
+            }
+            dev = FingerprintSensorEx.OpenDevice(0);
+            if (dev == 0) {
+                System.err.println("[ERROR] OpenDevice failed. Another program may be using the scanner.");
+                return;
+            }
+            db = FingerprintSensorEx.DBInit();
+            if (db == 0) {
+                System.err.println("[ERROR] DBInit failed");
+                return;
+            }
+            byte[] p = new byte[4];
+            int[] size = {4};
+            FingerprintSensorEx.GetParameters(dev, 1, p, size);
+            int w = toInt(p);
+            size[0] = 4;
+            FingerprintSensorEx.GetParameters(dev, 2, p, size);
+            int h = toInt(p);
+            if (w > 0 && h > 0) img = new byte[w * h];
+            System.out.println("[INFO] Reader opened. Image " + w + "x" + h);
+        } catch (Throwable t) {
+            System.err.println("[CRITICAL] " + t);
+        }
+    }
+
+    private static void cleanup() {
+        try {
+            if (db != 0) { FingerprintSensorEx.DBFree(db); db = 0; }
+            if (dev != 0) { FingerprintSensorEx.CloseDevice(dev); dev = 0; }
+            FingerprintSensorEx.Terminate();
+        } catch (Throwable ignored) {}
+    }
+
+    // --------------------------------------------------------- helpers
+    private interface Handler { void handle(HttpExchange ex) throws Exception; }
+
+    private static void run(HttpExchange ex, String method, Handler h) throws IOException {
+        try {
+            if (TOKEN != null && !TOKEN.isEmpty()
+                    && !TOKEN.equals(ex.getRequestHeaders().getFirst("X-Bridge-Token"))) {
+                send(ex, 401, err("UNAUTHORIZED", "Missing or invalid bridge token."));
+                return;
+            }
+            if (!method.equalsIgnoreCase(ex.getRequestMethod())) {
+                send(ex, 405, err("METHOD_NOT_ALLOWED", "Use " + method));
+                return;
+            }
+            h.handle(ex);
+        } catch (Throwable t) {
+            System.err.println("[ERROR] " + t);
+            try {
+                send(ex, 500, err("SERVER_ERROR", String.valueOf(t.getMessage()).replace("\"", "'")));
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static void send(HttpExchange ex, int status, String json) throws IOException {
+        byte[] b = json.getBytes(StandardCharsets.UTF_8);
+        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.sendResponseHeaders(status, b.length);
+        try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+    }
+
+    private static String err(String code, String msg) {
+        return "{\"status\":\"error\",\"code\":\"" + code + "\",\"message\":\"" + msg + "\"}";
+    }
+
+    private static String readBody(HttpExchange ex) throws IOException {
+        try (InputStream in = ex.getRequestBody()) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static String find(Pattern p, String s) {
+        Matcher m = p.matcher(s);
+        return m.find() ? m.group(1) : "";
+    }
+
+    private static int toInt(byte[] b) {
+        int n = b[0] & 0xFF;
+        n |= (b[1] << 8) & 0xFF00;
+        n |= (b[2] << 16) & 0xFF0000;
+        n |= (b[3] << 24) & 0xFF000000;
+        return n;
+    }
+
+    private static void sleep(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    private static boolean ready() { return dev != 0 && db != 0; }
+
+    /** Waits for a finger; returns a template or null on timeout. Call under HW_LOCK. */
+    private static byte[] capture(long timeoutMs) {
+        long end = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < end) {
+            byte[] tpl = new byte[TPL_MAX];
+            int[] len = {TPL_MAX};
+            if (FingerprintSensorEx.AcquireFingerprint(dev, img, tpl, len) == 0) return tpl;
+            sleep(50);
+        }
+        return null;
+    }
+
+    /** Waits until the finger leaves the glass. Call under HW_LOCK. */
+    private static boolean waitForLift(long timeoutMs) {
+        long end = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < end) {
+            byte[] tpl = new byte[TPL_MAX];
+            int[] len = {TPL_MAX};
+            if (FingerprintSensorEx.AcquireFingerprint(dev, img, tpl, len) != 0) return true;
+            sleep(100);
+        }
+        return false;
+    }
+
+    /** Adds a template to SDK memory under a new numeric id. Call under HW_LOCK. */
+    private static boolean register(String subjectId, byte[] tpl2048) {
+        int id = counter.getAndIncrement();
+        if (FingerprintSensorEx.DBAdd(db, id, tpl2048) != 0) return false;
+        idToSubject.put(id, subjectId);
+        subjects.add(subjectId);
+        return true;
+    }
+
+    // --------------------------------------------------------- handlers
+    private static void health(HttpExchange ex) throws Exception {
+        boolean ok = ready();
+        send(ex, 200, "{\"status\":\"online\",\"ready\":" + ok
+                + ",\"readerConnected\":" + ok
+                + ",\"hardwareConnected\":" + ok
+                + ",\"deviceCount\":" + deviceCount
+                + ",\"startedAt\":" + STARTED_AT
+                + ",\"loaded\":" + subjects.size()
+                + ",\"enrollPhase\":\"" + enrollPhase + "\""
+                + ",\"enrollStep\":" + enrollStep + "}");
+    }
+
+    private static void enroll(HttpExchange ex) throws Exception {
+        String subjectId = find(SUBJECT, readBody(ex));
+        if (!SAFE_ID.matcher(subjectId).matches()) {
+            send(ex, 400, err("INVALID_SUBJECT_ID", "Subject ID must be letters, numbers, _ or - (max 64)."));
+            return;
+        }
+
+        synchronized (HW_LOCK) {
+            if (!ready()) {
+                send(ex, 503, err("HARDWARE_ERROR", "Scanner not open. Close the ZKFinger demo and restart the bridge."));
+                return;
+            }
+            try {
+                System.out.println("[ENROLL] " + subjectId);
+                byte[][] scans = new byte[3][];
+
+                for (int i = 0; i < 3; i++) {
+                    enrollStep = i;
+                    enrollPhase = "touch";
+                    System.out.println("[SCAN " + (i + 1) + "/3] Touch the scanner");
+                    byte[] t = capture(TOUCH_TIMEOUT_MS);
+                    if (t == null) {
+                        send(ex, 408, err("SCAN_TIMEOUT", "Scan timed out. Touch the finger firmly on the scanner."));
+                        return;
+                    }
+
+                    if (i == 0) {
+                        int[] fid = {0};
+                        int[] score = {0};
+                        if (FingerprintSensorEx.DBIdentify(db, t, fid, score) == 0) {
+                            String owner = idToSubject.get(fid[0]);
+                            if (owner != null && !owner.equals(subjectId)) {
+                                send(ex, 409, err("DUPLICATE_FINGER", "This finger is already enrolled as " + owner + "."));
+                                return;
+                            }
+                        }
+                    } else if (FingerprintSensorEx.DBMatch(db, scans[i - 1], t) <= 0) {
+                        send(ex, 422, err("FINGER_MISMATCH", "Please press the same finger 3 times."));
+                        return;
+                    }
+                    scans[i] = t;
+
+                    if (i < 2) {
+                        enrollPhase = "lift";
+                        System.out.println("   Lift your finger...");
+                        if (!waitForLift(LIFT_TIMEOUT_MS)) {
+                            send(ex, 408, err("LIFT_TIMEOUT", "Finger was not lifted in time."));
+                            return;
+                        }
+                        sleep(300);
+                    }
+                }
+                enrollPhase = "idle";
+
+                byte[] reg = new byte[TPL_MAX];
+                int[] regLen = {TPL_MAX};
+                int ret = FingerprintSensorEx.DBMerge(db, scans[0], scans[1], scans[2], reg, regLen);
+                if (ret != 0) {
+                    send(ex, 422, err("MERGE_FAILED", "Scans did not match. Keep the finger flat and centered."));
+                    return;
+                }
+                if (!register(subjectId, reg)) {
+                    send(ex, 500, err("DB_ADD_FAILED", "SDK refused to store the template."));
+                    return;
+                }
+
+                int n = (regLen[0] > 0 && regLen[0] <= TPL_MAX) ? regLen[0] : TPL_MAX;
+                String b64 = Base64.getEncoder().encodeToString(Arrays.copyOf(reg, n));
+                System.out.println("[SUCCESS] Enrolled " + subjectId + " (template " + n + " bytes)");
+                send(ex, 200, "{\"status\":\"success\",\"enrolled\":true,\"subjectId\":\"" + subjectId
+                        + "\",\"templateBase64\":\"" + b64 + "\"}");
+            } finally {
+                enrollPhase = "idle";
+                enrollStep = 0;
+            }
+        }
+    }
+
+    private static void identify(HttpExchange ex) throws Exception {
+        synchronized (HW_LOCK) {
+            if (!ready()) {
+                send(ex, 503, err("HARDWARE_ERROR", "Scanner not open."));
+                return;
+            }
+            byte[] t = capture(IDENTIFY_TIMEOUT_MS);
+            if (t == null) {
+                send(ex, 408, err("NO_FINGER", "No finger detected on the scanner."));
+                return;
+            }
+            int[] fid = {0};
+            int[] score = {0};
+            String subjectId = null;
+            if (FingerprintSensorEx.DBIdentify(db, t, fid, score) == 0) {
+                subjectId = idToSubject.get(fid[0]);
+            }
+            if (subjectId == null) {
+                send(ex, 404, err("FINGERPRINT_NOT_FOUND", "No matching fingerprint."));
+                return;
+            }
+            send(ex, 200, "{\"status\":\"success\",\"matched\":true,\"subjectId\":\"" + subjectId
+                    + "\",\"score\":" + score[0] + "}");
+        }
+    }
+
+    private static void sync(HttpExchange ex) throws Exception {
+        String body = readBody(ex);
+        if (!body.contains("\"records\"")) {
+            send(ex, 400, err("BAD_JSON", "Expected records array"));
+            return;
+        }
+        int synced = 0, failed = 0;
+
+        synchronized (HW_LOCK) {
+            if (!ready()) {
+                send(ex, 503, err("HARDWARE_ERROR", "Scanner not open."));
+                return;
+            }
+
+            // Start clean: free the SDK database and create a new empty one
+            FingerprintSensorEx.DBFree(db);
+            db = FingerprintSensorEx.DBInit();
+            idToSubject.clear();
+            subjects.clear();
+            counter.set(1);
+            if (db == 0) {
+                send(ex, 500, err("DB_INIT_FAILED", "Could not re-create the SDK database. Restart the bridge."));
+                return;
+            }
+
+            Matcher m = RECORD.matcher(body);
+            while (m.find()) {
+                String rec = m.group();
+                String subjectId = find(SUBJECT, rec);
+                String b64 = find(TEMPLATE, rec);
+                if (!SAFE_ID.matcher(subjectId).matches() || b64.isEmpty()) { failed++; continue; }
+                try {
+                    byte[] raw = Base64.getDecoder().decode(b64);
+                    byte[] full = new byte[TPL_MAX];
+                    System.arraycopy(raw, 0, full, 0, Math.min(raw.length, TPL_MAX));
+                    if (register(subjectId, full)) synced++; else failed++;
+                } catch (Exception e) {
+                    failed++;
+                }
+            }
+        }
+        System.out.println("[SYNC] restored=" + synced + " failed=" + failed);
+        send(ex, 200, "{\"status\":\"success\",\"synced\":" + synced + ",\"failed\":" + failed + "}");
+    }
+}

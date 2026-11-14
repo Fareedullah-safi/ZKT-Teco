@@ -1,10 +1,356 @@
 "use client";
 
-import {useEffect, useState} from "react";
+import {useCallback, useEffect, useRef, useState} from "react";
 
-const STORAGE_KEY = "zk9500-user-profiles-v1";
+/* ── Toasts ── */
+function ToastContainer({toasts, onDismiss}) {
+  return (
+    <div className="fixed top-5 right-5 z-[9999] flex flex-col gap-3 w-full max-w-sm pointer-events-none px-4 sm:px-0">
+      {toasts.map((t) => (
+        <Toast key={t.id} toast={t} onDismiss={onDismiss} />
+      ))}
+    </div>
+  );
+}
 
-const INITIAL_FORM = {
+function Toast({toast, onDismiss}) {
+  const [exiting, setExiting] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setExiting(true);
+      setTimeout(() => onDismiss(toast.id), 300);
+    }, toast.duration || 5000);
+    return () => clearTimeout(timer);
+  }, [toast, onDismiss]);
+
+  const colors = {
+    success: "border-emerald-500/40 from-emerald-500/15 to-emerald-500/5 text-emerald-400",
+    error: "border-red-500/40 from-red-500/15 to-red-500/5 text-red-400",
+    warning: "border-amber-500/40 from-amber-500/15 to-amber-500/5 text-amber-400",
+    info: "border-blue-500/40 from-blue-500/15 to-blue-500/5 text-blue-400",
+  };
+  const bar = {
+    success: "bg-emerald-500",
+    error: "bg-red-500",
+    warning: "bg-amber-500",
+    info: "bg-blue-500",
+  };
+
+  return (
+    <div
+      onClick={() => {
+        setExiting(true);
+        setTimeout(() => onDismiss(toast.id), 300);
+      }}
+      className={`pointer-events-auto rounded-xl border bg-gradient-to-br backdrop-blur-md shadow-lg cursor-pointer overflow-hidden
+        ${colors[toast.type] || colors.info}
+        ${exiting ? "animate-slide-out-right" : "animate-slide-in-right"}`}
+    >
+      <div className="p-4">
+        <strong className="block text-sm font-bold text-slate-100">{toast.title}</strong>
+        {toast.message && (
+          <p className="text-xs text-slate-300 mt-1 leading-relaxed">{toast.message}</p>
+        )}
+      </div>
+      <div className="h-0.5 bg-white/5">
+        <div
+          className={`h-full ${bar[toast.type] || bar.info} animate-progress-bar`}
+          style={{animationDuration: `${toast.duration || 5000}ms`}}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ── Fingerprint visual ── */
+function FingerprintScanner({state, scanStep, scanTotal}) {
+  const scanning = state === "scanning";
+  const success = state === "success";
+  const error = state === "error";
+
+  return (
+    <div className="flex flex-col items-center gap-4">
+      <div
+        className={`relative w-40 h-48 rounded-3xl border-2 flex items-center justify-center overflow-hidden transition-all
+          ${scanning ? "border-indigo-500 shadow-[0_0_24px_rgba(99,102,241,0.35)]" : ""}
+          ${success ? "border-emerald-500 shadow-[0_0_24px_rgba(16,185,129,0.35)]" : ""}
+          ${error ? "border-red-500 shadow-[0_0_24px_rgba(239,68,68,0.35)] animate-shake" : ""}
+          ${!scanning && !success && !error ? "border-white/10 bg-white/5" : "bg-bgPrimary/40"}`}
+      >
+        {scanning && (
+          <div className="absolute left-[10%] right-[10%] h-[3px] bg-gradient-to-r from-transparent via-indigo-400 to-transparent animate-scan z-10" />
+        )}
+
+        <svg
+          viewBox="0 0 100 100"
+          className={`w-24 h-24 ${
+            scanning
+              ? "text-indigo-400"
+              : success
+                ? "text-emerald-500/40"
+                : error
+                  ? "text-red-500/40"
+                  : "text-indigo-300/50"
+          }`}
+        >
+          <path
+            d="M50 15C30 15 18 30 18 50s12 35 32 35 32-15 32-35S70 15 50 15z"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            fill="none"
+            opacity=".3"
+          />
+          <path
+            d="M50 25C36 25 28 36 28 50s8 25 22 25 22-11 22-25-8-25-22-25z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            fill="none"
+            opacity=".45"
+          />
+          <path
+            d="M50 35C42 35 38 42 38 50s4 15 12 15 12-7 12-15-4-15-12-15z"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            fill="none"
+            opacity=".6"
+          />
+          <ellipse
+            cx="50"
+            cy="50"
+            rx="4"
+            ry="5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            fill="none"
+            opacity=".8"
+          />
+        </svg>
+
+        {success && (
+          <div className="absolute inset-0 bg-bgPrimary/50 flex items-center justify-center">
+            <svg viewBox="0 0 52 52" className="w-14 h-14 text-emerald-400 animate-success-pop">
+              <circle cx="26" cy="26" r="24" fill="none" stroke="currentColor" strokeWidth="2.5" />
+              <path
+                d="M14 27l8 8 16-16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+        )}
+        {error && (
+          <div className="absolute inset-0 bg-bgPrimary/50 flex items-center justify-center">
+            <svg viewBox="0 0 52 52" className="w-14 h-14 text-red-400 animate-success-pop">
+              <circle cx="26" cy="26" r="24" fill="none" stroke="currentColor" strokeWidth="2.5" />
+              <path
+                d="M18 18l16 16M34 18l-16 16"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+        )}
+      </div>
+
+      {scanning && scanTotal > 0 && (
+        <div className="flex gap-2">
+          {Array.from({length: scanTotal}, (_, i) => (
+            <div
+              key={i}
+              className={`w-2.5 h-2.5 rounded-full border-2 ${
+                i < scanStep
+                  ? "bg-indigo-500 border-indigo-500"
+                  : i === scanStep
+                    ? "border-indigo-400 animate-pulse"
+                    : "border-white/20"
+              }`}
+            />
+          ))}
+        </div>
+      )}
+
+      <p
+        className={`text-sm font-medium text-center px-2 ${
+          scanning
+            ? "text-indigo-300"
+            : success
+              ? "text-emerald-400"
+              : error
+                ? "text-red-400"
+                : "text-slate-500"
+        }`}
+      >
+        {state === "idle" && "Ready to scan"}
+        {scanning &&
+          (scanTotal > 1 ? `Place finger… ${scanStep}/${scanTotal}` : "Place finger on scanner…")}
+        {success && "Success!"}
+        {error && "Failed — see toast"}
+      </p>
+    </div>
+  );
+}
+
+function formatDate(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// CHANGED: hint now matches the new run-server.bat setup
+const BRIDGE_HINT =
+  "Start the bridge: double-click run-server.bat in the fingerprint-server folder.";
+
+// Exact-code toasts for the route/bridge
+const CODE_TOASTS = {
+  SUBJECT_EXISTS: {
+    type: "warning",
+    title: "Duplicate Subject ID",
+    message: "That Subject ID is already enrolled. Use a new ID like CUST_002.",
+  },
+  DUPLICATE_FINGER: {
+    type: "warning",
+    title: "Finger Already Enrolled",
+    message: "This finger is already registered to another subject.",
+  },
+  INVALID_SUBJECT_ID: {
+    type: "warning",
+    title: "Invalid Subject ID",
+    message: "Use only letters, numbers, '_' and '-' (max 64 characters). No spaces.",
+  },
+  NO_FINGER: {
+    type: "warning",
+    title: "No Finger Detected",
+    message: "Click Start, then place your finger on the scanner within 10 seconds.",
+  },
+  LIFT_TIMEOUT: {
+    type: "warning",
+    title: "Finger Not Lifted",
+    message: "Lift your finger completely off the scanner between each touch.",
+  },
+  FINGERPRINT_NOT_FOUND: {
+    type: "error",
+    title: "No Match",
+    message: "Fingerprint is not enrolled yet. Enroll this person first.",
+  },
+  BRIDGE_TIMEOUT: {
+    type: "error",
+    title: "Scanner Bridge Timed Out",
+    message: "The scanner bridge took too long to respond. Try again.",
+  },
+  SCANNER_DISCONNECTED: {
+    type: "error",
+    title: "Scanner Not Connected",
+    message: "Unplug USB → wait 3s → replug → restart the Java bridge.",
+  },
+  UNAUTHORIZED: {
+    type: "error",
+    title: "Bridge Auth Failed",
+    message: "BRIDGE_TOKEN in .env.local must match the one the Java bridge was started with.",
+  },
+};
+
+/** Map API / hardware errors → clear toast text */
+function getErrorToast(data, fallbackTitle = "Error") {
+  const code = data?.code || "";
+  const raw = data?.message || data?.error || "Unknown error";
+
+  // exact error codes win over the regex matching below
+  if (CODE_TOASTS[code]) return CODE_TOASTS[code];
+
+  if (code === "DUPLICATE_SUBJECT_ID" || /already exists/i.test(raw)) {
+    return {
+      type: "warning",
+      title: "Duplicate Subject ID",
+      message: raw || "That Subject ID is already enrolled. Use a new ID like CUST_002.",
+    };
+  }
+  if (
+    code === "BRIDGE_OFFLINE" ||
+    code === "BRIDGE_UNREACHABLE" ||
+    /bridge|8765|offline/i.test(raw)
+  ) {
+    return {
+      type: "error",
+      title: "Scanner Bridge Offline",
+      message: BRIDGE_HINT,
+    };
+  }
+  if (code === "DATABASE_OFFLINE" || /mongo|database/i.test(raw)) {
+    return {
+      type: "error",
+      title: "Database Offline",
+      message: "Check MONGODB_URI in .env.local and that MongoDB is running.",
+    };
+  }
+  if (/timeout|timed out|place finger/i.test(raw)) {
+    return {
+      type: "warning",
+      title: "Scan Timed Out",
+      message:
+        "Click Enroll, then place the SAME finger 3 times. Lift completely between each touch.",
+    };
+  }
+  if (/merge|did not match|scans did not|quality|flat/i.test(raw)) {
+    return {
+      type: "warning",
+      title: "Scans Did Not Match",
+      message:
+        "Use the same finger, keep it flat and still, lift off between each of the 3 touches.",
+    };
+  }
+  if (/hardware|device|unplugged|OpenDevice|reader/i.test(raw)) {
+    return {
+      type: "error",
+      title: "Hardware Error",
+      message:
+        raw || "ZK9500 busy or unplugged. Unplug USB → wait 3s → replug → restart Java bridge.",
+    };
+  }
+  if (code === "FINGERPRINT_NOT_RECOGNIZED" || /not found|not recognized/i.test(raw)) {
+    return {
+      type: "error",
+      title: "No Match",
+      message: "Fingerprint is not enrolled yet. Enroll this person first.",
+    };
+  }
+  if (code === "PROFILE_NOT_FOUND") {
+    return {
+      type: "warning",
+      title: "Profile Missing in MongoDB",
+      message:
+        raw || "Finger matched scanner memory, but no customer profile exists in the database.",
+    };
+  }
+
+  return {
+    type: "error",
+    title: fallbackTitle,
+    message: raw,
+  };
+}
+
+// Default demo data so the form is never empty
+const defaultForm = {
+  subjectId: "CUST_001",
+  fullName: "John Doe",
+  phone: "0300-1234567",
+  email: "john.doe@email.com",
+  nationality: "Pakistani",
+  address: "Lahore, Pakistan",
+  notes: "Demo customer — replace with real data",
+};
+
+const emptyForm = {
   subjectId: "",
   fullName: "",
   phone: "",
@@ -14,436 +360,566 @@ const INITIAL_FORM = {
   notes: "",
 };
 
-function formatDate(isoString) {
-  if (!isoString) return "Never";
-  const date = new Date(isoString);
-  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
-}
-
-export default function Home() {
-  const [bridgeUrl, setBridgeUrl] = useState("http://127.0.0.1:8765");
-  const [form, setForm] = useState({...INITIAL_FORM});
-  const [profiles, setProfiles] = useState([]);
-  const [storageReady, setStorageReady] = useState(false);
+export default function HomePage() {
+  // CHANGED: default comes from .env.local (NEXT_PUBLIC_BRIDGE_URL), still editable
+  const [bridgeUrl, setBridgeUrl] = useState(
+    process.env.NEXT_PUBLIC_BRIDGE_URL || "http://127.0.0.1:8765"
+  );
+  const [connected, setConnected] = useState(null);
+  const [activeTab, setActiveTab] = useState("enroll");
+  const [form, setForm] = useState(defaultForm);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("Ready. Place finger on reader when scanning.");
-  const [matchedProfile, setMatchedProfile] = useState(null);
-  const [matchResult, setMatchResult] = useState(null);
+  const [scannerState, setScannerState] = useState("idle");
+  const [scanStep, setScanStep] = useState(0);
+  const [scanTotal, setScanTotal] = useState(0);
+  const [matchedCustomer, setMatchedCustomer] = useState(null);
+  const [matchScore, setMatchScore] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const [syncing, setSyncing] = useState(false);
+  const toastId = useRef(0);
+  const didSync = useRef(false);
 
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          setProfiles(parsed);
-        }
-      }
-    } catch (err) {
-      console.error("Could not read from localStorage:", err);
-    } finally {
-      setStorageReady(true);
-    }
+  const addToast = useCallback((type, title, message, duration = 5500) => {
+    const id = ++toastId.current;
+    setToasts((prev) => [...prev, {id, type, title, message, duration}]);
   }, []);
 
-  function handleInputChange(e) {
-    const {name, value} = e.target;
-    setForm((prev) => ({...prev, [name]: value}));
-  }
+  const dismissToast = useCallback((id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
-  function saveProfilesToStorage(updatedProfiles) {
-    setProfiles(updatedProfiles);
+  const headers = useCallback(
+    () => ({
+      "Content-Type": "application/json",
+      "x-bridge-url": bridgeUrl,
+    }),
+    [bridgeUrl]
+  );
+
+  // Live bridge status
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await fetch("/api/fingerprint?action=status", {
+          headers: headers(),
+          cache: "no-store",
+        });
+        const data = await res.json();
+        if (!cancelled) {
+          const online = res.ok && data.status !== "offline" && !data.error;
+          setConnected(online);
+        }
+      } catch {
+        if (!cancelled) setConnected(false);
+      }
+    };
+    check();
+    const t = setInterval(check, 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [headers]);
+
+  // (CHANGED: removed the unused second `check` function that used `cancelled` out of scope)
+
+  // Auto-sync templates from MongoDB → Java RAM when bridge comes online
+  useEffect(() => {
+    if (!connected || didSync.current) return;
+    let cancelled = false;
+
+    const runSync = async () => {
+      setSyncing(true);
+      try {
+        const res = await fetch("/api/fingerprint", {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({action: "sync"}),
+        });
+        const data = await res.json();
+        if (!cancelled) {
+          didSync.current = true;
+          if (res.ok) {
+            addToast(
+              "info",
+              "Templates Synced",
+              data.count != null
+                ? `Restored ${data.count} fingerprint(s) from MongoDB to scanner.`
+                : "Scanner memory synced from MongoDB."
+            );
+          }
+        }
+      } catch {
+        // silent — bridge may still be starting
+      } finally {
+        if (!cancelled) setSyncing(false);
+      }
+    };
+
+    runSync();
+    return () => {
+      cancelled = true;
+    };
+  }, [connected, headers, addToast]);
+
+  // Fake progress dots while enroll request is in flight (bridge does real 1/2/3)
+  useEffect(() => {
+    if (!busy || scanTotal < 3) return;
+    setScanStep(0);
+    const t1 = setTimeout(() => setScanStep(1), 2000);
+    const t2 = setTimeout(() => setScanStep(2), 5000);
+    const t3 = setTimeout(() => setScanStep(3), 8000);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [busy, scanTotal]);
+
+  // ── IDENTIFY ──
+  const handleIdentify = async () => {
+    setBusy(true);
+    setScannerState("scanning");
+    setScanStep(0);
+    setScanTotal(1);
+    setMatchedCustomer(null);
+    setMatchScore(null);
+
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedProfiles));
+      const res = await fetch("/api/fingerprint", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({action: "identify"}),
+      });
+      const data = await res.json();
+
+      // Accept all shapes: { success }, { matched } or { status: "success" }
+      const customer = data.customer;
+      // CHANGED: also accept data.status === "success" (what the route returns)
+      const ok = res.ok && customer && (data.success || data.matched || data.status === "success");
+
+      if (ok) {
+        setScannerState("success");
+        setMatchedCustomer(customer);
+        setMatchScore(data.score ?? data.matchScore ?? null);
+        addToast("success", "Identity Verified", `Welcome, ${customer.fullName}!`);
+      } else if ((data.matched || data.subjectId) && !customer) {
+        setScannerState("error");
+        const t = getErrorToast(
+          {
+            code: "PROFILE_NOT_FOUND",
+            message:
+              data.error ||
+              data.message ||
+              `Finger matched (ID: ${data.subjectId}), but no MongoDB profile found.`,
+          },
+          "Partial Match"
+        );
+        addToast(t.type, t.title, t.message);
+      } else {
+        setScannerState("error");
+        const t = getErrorToast(data, "No Match");
+        addToast(t.type, t.title, t.message);
+      }
     } catch (err) {
-      console.error("Failed to save to localStorage:", err);
+      setScannerState("error");
+      addToast("error", "Network Error", err.message || "Could not reach API.");
+    } finally {
+      setBusy(false);
+      setTimeout(() => setScannerState("idle"), 3500);
     }
-  }
+  };
 
-  async function runAction(action) {
-    const enteredId = form.subjectId.trim();
-
-    if (action === "enroll") {
-      if (!enteredId) {
-        setStatus("Please enter a User / Customer ID before enrolling.");
-        return;
-      }
-      if (!form.fullName.trim()) {
-        setStatus("Please enter the Full Name before enrolling.");
-        return;
-      }
+  // ── ENROLL ──
+  const handleEnroll = async (e) => {
+    e.preventDefault();
+    if (!form.subjectId.trim() || !form.fullName.trim()) {
+      addToast("warning", "Missing fields", "Subject ID and Full Name are required.");
+      return;
     }
 
     setBusy(true);
-    setMatchedProfile(null);
-    setMatchResult(null);
+    setScannerState("scanning");
+    setScanStep(0);
+    setScanTotal(3);
+    setMatchedCustomer(null);
 
-    if (action === "health") {
-      setStatus("Checking fingerprint reader connection...");
-    } else if (action === "enroll") {
-      setStatus("Starting enrollment. Place and lift the SAME finger 3 times...");
-    } else if (action === "identify") {
-      setStatus("Scanning... Place your finger on the reader.");
-    }
-
-    let isPolling = action !== "health";
-    let pollInterval = null;
-
-    // Send the user's specific bridge URL in custom header
-    const headers = {
-      "Content-Type": "application/json",
-      "x-bridge-url": bridgeUrl.trim(),
-    };
-
-    if (isPolling) {
-      pollInterval = setInterval(async () => {
-        try {
-          const res = await fetch("/api/fingerprint?action=status", {
-            cache: "no-store",
-            headers,
-          });
-          const data = await res.json();
-          console.log(data)
-          if (data && data.status) {
-            setStatus(data.status);
-          }
-        } catch {
-          // Ignore polling errors
-        }
-      }, 400);
-    }
+    addToast(
+      "info",
+      "Enrollment Started",
+      "Place the SAME finger on the scanner 3 times. Lift completely between each touch.",
+      8000
+    );
 
     try {
-      let res;
-
-      if (action === "health") {
-        res = await fetch("/api/fingerprint", {
-          cache: "no-store",
-          headers,
-        });
-      } else {
-        const body =
-          action === "enroll" ? {action: "enroll", subjectId: enteredId} : {action: "identify"};
-        res = await fetch("/api/fingerprint", {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-        });
-      }
-
+      const res = await fetch("/api/fingerprint", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({action: "enroll", ...form}),
+      });
       const data = await res.json();
 
-      if (!res.ok) {
-        throw new Error(data.error || "Operation failed.");
-      }
+      if (res.ok && (data.success || data.customer)) {
+        setScannerState("success");
+        setScanStep(3);
+        if (data.customer) setMatchedCustomer(data.customer);
 
-      if (action === "health") {
-        if (data.readerConnected) {
-          setStatus(`Reader Connected! Found ${data.deviceCount} device(s).`);
+        if (data.partial) {
+          addToast(
+            "warning",
+            "Profile Saved (Partial)",
+            data.warning || data.message || "Saved to MongoDB, but fingerprint scan was incomplete."
+          );
         } else {
-          setStatus("Java Bridge is running, but USB reader is disconnected.");
+          addToast(
+            "success",
+            "Enrollment Complete",
+            data.message || `${form.fullName} saved to MongoDB + scanner!`
+          );
         }
-      } else if (action === "enroll") {
-        if (data.enrolled) {
-          const now = new Date().toISOString();
-          const newProfile = {
-            subjectId: enteredId,
-            fullName: form.fullName.trim(),
-            phone: form.phone.trim(),
-            email: form.email.trim(),
-            nationality: form.nationality.trim(),
-            address: form.address.trim(),
-            notes: form.notes.trim(),
-            enrolledAt: now,
-            lastIdentifiedAt: null,
-          };
 
-          const updated = [newProfile, ...profiles.filter((p) => p.subjectId !== enteredId)];
-          saveProfilesToStorage(updated);
-
-          setStatus(`Successfully enrolled fingerprint for ${enteredId}! Profile saved.`);
-          setForm({...INITIAL_FORM});
-        }
-      } else if (action === "identify") {
-        setMatchResult(data);
-
-        if (data.matched && data.subjectId) {
-          const foundId = String(data.subjectId).trim();
-          const userProfile = profiles.find((p) => p.subjectId === foundId);
-
-          if (userProfile) {
-            const now = new Date().toISOString();
-            const updatedProfile = {...userProfile, lastIdentifiedAt: now};
-
-            const updatedList = profiles.map((p) => (p.subjectId === foundId ? updatedProfile : p));
-            saveProfilesToStorage(updatedList);
-
-            setMatchedProfile(updatedProfile);
-            setStatus(`MATCH FOUND! Showing stored data for ID: ${foundId}`);
-          } else {
-            setStatus(
-              `Fingerprint matched ID "${foundId}", but no profile data was found in local storage.`
-            );
-          }
-        } else {
-          setStatus("No matching fingerprint found. Please enroll first.");
-        }
+        // Next customer defaults
+        const nextNum = String(Date.now()).slice(-4);
+        setForm({
+          ...defaultForm,
+          subjectId: `CUST_${nextNum}`,
+          fullName: "",
+          phone: "",
+          email: "",
+          notes: "",
+        });
+      } else {
+        setScannerState("error");
+        const t = getErrorToast(data, "Enrollment Error");
+        addToast(t.type, t.title, t.message, 7000);
       }
     } catch (err) {
-      setStatus(`Error: ${err.message}`);
+      setScannerState("error");
+      addToast("error", "Network Error", err.message || "Could not reach API / bridge.");
     } finally {
-      if (pollInterval) clearInterval(pollInterval);
       setBusy(false);
+      setTimeout(() => setScannerState("idle"), 4000);
     }
-  }
+  };
+
+  const fillDemo = () => {
+    const n = String(Date.now()).slice(-4);
+    setForm({
+      subjectId: `CUST_${n}`,
+      fullName: "John Doe",
+      phone: "0300-1234567",
+      email: "john.doe@email.com",
+      nationality: "Pakistani",
+      address: "Lahore, Pakistan",
+      notes: "Demo customer",
+    });
+    addToast("info", "Demo Data Loaded", `Subject ID set to CUST_${n}`);
+  };
+
+  const inputClass =
+    "w-full bg-bgInput border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none disabled:opacity-50";
 
   return (
-    <main className="min-h-screen bg-slate-100 p-6 text-slate-900">
-      <div className="mx-auto max-w-3xl space-y-6">
-        {/* Header */}
-        <div className="rounded-2xl bg-white p-6 shadow-sm border border-slate-200">
-          <h1 className="text-2xl font-bold text-slate-800">ZK9500 Fingerprint System</h1>
-          <p className="text-sm text-slate-600 mt-1">
-            Enroll user data with fingerprint, or scan finger to retrieve stored details.
-          </p>
-        </div>
+    <>
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
-        {/* Bridge URL Input */}
-        <div className="rounded-xl bg-white border border-slate-200 p-4 shadow-sm">
-          <label className="block text-xs font-bold uppercase text-slate-500 mb-1">
-            Scanner Bridge URL for this PC
-          </label>
-          <input
-            type="text"
-            value={bridgeUrl}
-            onChange={(e) => setBridgeUrl(e.target.value)}
-            disabled={busy}
-            placeholder="http://127.0.0.1:8765 or https://your-tunnel.loca.lt"
-            className="w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none font-mono"
-          />
-          <p className="text-xs text-slate-500 mt-1">
-            Each user sets their own bridge/tunnel URL here. (Default:{" "}
-            <code>http://127.0.0.1:8765</code>).
-          </p>
-        </div>
+      <div className="fixed -top-[20%] -left-[10%] w-[500px] h-[500px] rounded-full bg-indigo-500/10 blur-[100px] pointer-events-none" />
+      <div className="fixed inset-0 bg-grid-overlay pointer-events-none" />
 
-        {/* Status Bar */}
-        <div className="rounded-xl bg-blue-50 border border-blue-200 p-4 text-blue-900 font-medium">
-          <span className="font-bold">Status: </span> {status}
-        </div>
-
-        {/* Form: Add / Enroll User Data */}
-        <section className="rounded-2xl bg-white p-6 shadow-sm border border-slate-200">
-          <h2 className="text-lg font-bold mb-4 text-slate-800">1. Enroll New User Data</h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-semibold text-slate-700">
-                User / Customer ID *
-              </label>
-              <input
-                type="text"
-                name="subjectId"
-                value={form.subjectId}
-                onChange={handleInputChange}
-                disabled={busy}
-                placeholder="e.g. CUST-101"
-                className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-slate-700">Full Name *</label>
-              <input
-                type="text"
-                name="fullName"
-                value={form.fullName}
-                onChange={handleInputChange}
-                disabled={busy}
-                placeholder="e.g. John Doe"
-                className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-slate-700">Phone Number</label>
-              <input
-                type="text"
-                name="phone"
-                value={form.phone}
-                onChange={handleInputChange}
-                disabled={busy}
-                placeholder="+1 234 567 890"
-                className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-slate-700">Email Address</label>
-              <input
-                type="email"
-                name="email"
-                value={form.email}
-                onChange={handleInputChange}
-                disabled={busy}
-                placeholder="john@example.com"
-                className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-slate-700">Nationality</label>
-              <input
-                type="text"
-                name="nationality"
-                value={form.nationality}
-                onChange={handleInputChange}
-                disabled={busy}
-                placeholder="e.g. American"
-                className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-slate-700">Address</label>
-              <input
-                type="text"
-                name="address"
-                value={form.address}
-                onChange={handleInputChange}
-                disabled={busy}
-                placeholder="123 Street Name"
-                className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="block text-sm font-semibold text-slate-700">
-                Notes / Description
-              </label>
-              <textarea
-                name="notes"
-                value={form.notes}
-                onChange={handleInputChange}
-                disabled={busy}
-                rows={2}
-                placeholder="Additional notes..."
-                className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
+      <header className="sticky top-0 z-50 border-b border-white/5 bg-bgPrimary/80 backdrop-blur-xl">
+        <div className="max-w-7xl mx-auto px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h1 className="text-xl font-extrabold bg-gradient-to-br from-indigo-300 to-indigo-500 bg-clip-text text-transparent">
+              BioID
+            </h1>
+            <p className="text-[10px] uppercase tracking-wider text-slate-500">
+              Fingerprint Identity
+            </p>
           </div>
 
-          <div className="mt-6 flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={() => runAction("health")}
-              disabled={busy}
-              className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              value={bridgeUrl}
+              onChange={(e) => {
+                setBridgeUrl(e.target.value);
+                didSync.current = false;
+              }}
+              className="bg-bgInput border border-white/10 rounded-md text-xs px-3 py-1.5 w-56 font-mono text-slate-200 outline-none focus:border-indigo-500"
+              placeholder="http://127.0.0.1:8765"
+            />
+            <div
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold ${
+                connected === true
+                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                  : connected === false
+                    ? "bg-red-500/10 border-red-500/30 text-red-400"
+                    : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+              }`}
             >
-              Check Reader
-            </button>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  connected === true
+                    ? "bg-emerald-500"
+                    : connected === false
+                      ? "bg-red-500"
+                      : "bg-amber-500 animate-pulse"
+                }`}
+              />
+              {connected === true
+                ? syncing
+                  ? "Syncing…"
+                  : "Scanner Online"
+                : connected === false
+                  ? "Offline"
+                  : "Checking…"}
+            </div>
+          </div>
+        </div>
+      </header>
 
-            <button
-              type="button"
-              onClick={() => runAction("enroll")}
-              disabled={busy || !storageReady}
-              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
-            >
-              Enroll Fingerprint
-            </button>
+      <main className="relative z-10 max-w-7xl mx-auto px-6 py-10 grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+        {/* LEFT */}
+        <section>
+          <div className="flex gap-1 p-1 bg-bgCard border border-white/5 rounded-2xl mb-6">
+            {["identify", "enroll"].map((tab) => (
+              <button
+                key={tab}
+                disabled={busy}
+                onClick={() => setActiveTab(tab)}
+                className={`flex-1 py-2.5 rounded-xl text-sm font-semibold capitalize transition-all ${
+                  activeTab === tab
+                    ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                } disabled:opacity-50`}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          <div className="bg-bgCard border border-white/5 rounded-3xl p-6 sm:p-8 shadow-xl">
+            {activeTab === "identify" ? (
+              <>
+                <h2 className="text-xl font-bold mb-1">Verify Identity</h2>
+                <p className="text-sm text-slate-400 mb-8">
+                  Scan finger → load profile from MongoDB
+                </p>
+                <div className="py-4 mb-8">
+                  <FingerprintScanner
+                    state={scannerState}
+                    scanStep={scanStep}
+                    scanTotal={scanTotal}
+                  />
+                </div>
+                <button
+                  onClick={handleIdentify}
+                  disabled={busy || !connected}
+                  className="w-full py-3.5 rounded-xl text-sm font-bold text-white bg-gradient-to-br from-indigo-500 to-indigo-600 shadow-lg shadow-indigo-500/30 hover:-translate-y-0.5 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {busy ? "Scanning…" : "Start Identification"}
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-3 mb-6">
+                  <div>
+                    <h2 className="text-xl font-bold mb-1">Enroll Customer</h2>
+                    <p className="text-sm text-slate-400">
+                      Save profile to MongoDB + fingerprint on scanner
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={fillDemo}
+                    disabled={busy}
+                    className="shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg border border-white/10 text-slate-300 hover:bg-white/5 disabled:opacity-50"
+                  >
+                    Fill Demo
+                  </button>
+                </div>
+
+                <form onSubmit={handleEnroll} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 uppercase">
+                        Subject ID *
+                      </label>
+                      <input
+                        className={inputClass}
+                        required
+                        disabled={busy}
+                        value={form.subjectId}
+                        onChange={(e) => setForm({...form, subjectId: e.target.value})}
+                        placeholder="CUST_001"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 uppercase">
+                        Full Name *
+                      </label>
+                      <input
+                        className={inputClass}
+                        required
+                        disabled={busy}
+                        value={form.fullName}
+                        onChange={(e) => setForm({...form, fullName: e.target.value})}
+                        placeholder="John Doe"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 uppercase">
+                        Phone
+                      </label>
+                      <input
+                        className={inputClass}
+                        disabled={busy}
+                        value={form.phone}
+                        onChange={(e) => setForm({...form, phone: e.target.value})}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 uppercase">
+                        Email
+                      </label>
+                      <input
+                        type="email"
+                        className={inputClass}
+                        disabled={busy}
+                        value={form.email}
+                        onChange={(e) => setForm({...form, email: e.target.value})}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 uppercase">
+                        Nationality
+                      </label>
+                      <input
+                        className={inputClass}
+                        disabled={busy}
+                        value={form.nationality}
+                        onChange={(e) => setForm({...form, nationality: e.target.value})}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 uppercase">
+                        Address
+                      </label>
+                      <input
+                        className={inputClass}
+                        disabled={busy}
+                        value={form.address}
+                        onChange={(e) => setForm({...form, address: e.target.value})}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-400 uppercase">
+                      Notes
+                    </label>
+                    <textarea
+                      rows={2}
+                      className={inputClass}
+                      disabled={busy}
+                      value={form.notes}
+                      onChange={(e) => setForm({...form, notes: e.target.value})}
+                    />
+                  </div>
+
+                  {busy && (
+                    <div className="py-4">
+                      <FingerprintScanner
+                        state={scannerState}
+                        scanStep={scanStep}
+                        scanTotal={scanTotal}
+                      />
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={busy || !connected}
+                    className="w-full py-3.5 rounded-xl text-sm font-bold text-white bg-gradient-to-br from-indigo-500 to-indigo-600 shadow-lg shadow-indigo-500/30 disabled:opacity-50"
+                  >
+                    {busy ? "Enrolling… place finger 3 times" : "Enroll & Save to MongoDB"}
+                  </button>
+                </form>
+              </>
+            )}
           </div>
         </section>
 
-        {/* Section 2: Identify via Fingerprint */}
-        <section className="rounded-2xl bg-white p-6 shadow-sm border border-slate-200">
-          <h2 className="text-lg font-bold mb-2 text-slate-800">
-            2. Fetch User Data with Fingerprint
-          </h2>
-          <p className="text-sm text-slate-600 mb-4">
-            Click below and place finger on scanner to display the user&apos;s full profile.
-          </p>
+        {/* RIGHT */}
+        <section>
+          {matchedCustomer ? (
+            <div className="bg-bgCard border border-emerald-500/30 rounded-3xl p-6 sm:p-8 shadow-[0_0_40px_rgba(16,185,129,0.08)] animate-fade-in-up">
+              <div className="flex flex-wrap items-center gap-4 mb-6">
+                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-indigo-600 flex items-center justify-center text-lg font-black text-white">
+                  {matchedCustomer.fullName
+                    .split(" ")
+                    .map((n) => n[0])
+                    .join("")
+                    .slice(0, 2)
+                    .toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-xl font-bold truncate">{matchedCustomer.fullName}</h2>
+                  <span className="inline-block mt-1 font-mono text-xs text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-md">
+                    {matchedCustomer.subjectId}
+                  </span>
+                </div>
+                {matchScore != null && (
+                  <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-3 py-1.5 rounded-lg text-xs font-bold">
+                    Score: {matchScore}
+                  </div>
+                )}
+              </div>
 
-          <button
-            type="button"
-            onClick={() => runAction("identify")}
-            disabled={busy || !storageReady}
-            className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white hover:bg-green-700 disabled:opacity-50 text-base"
-          >
-            Identify & Fetch Data
-          </button>
+              <hr className="border-white/5 mb-5" />
+
+              <div className="space-y-3 text-sm">
+                {[
+                  ["Phone", matchedCustomer.phone],
+                  ["Email", matchedCustomer.email],
+                  ["Nationality", matchedCustomer.nationality],
+                  ["Address", matchedCustomer.address],
+                  ["Enrolled", formatDate(matchedCustomer.enrolledAt)],
+                  ["Last Seen", formatDate(matchedCustomer.lastIdentifiedAt)],
+                ].map(
+                  ([label, value]) =>
+                    value &&
+                    value !== "—" && (
+                      <div
+                        key={label}
+                        className="flex justify-between gap-4 py-2 border-b border-white/5 last:border-0"
+                      >
+                        <span className="text-slate-400">{label}</span>
+                        <span className="text-slate-100 text-right font-medium">{value}</span>
+                      </div>
+                    )
+                )}
+                {matchedCustomer.notes && (
+                  <div className="pt-2">
+                    <span className="text-slate-400 text-xs">Notes</span>
+                    <p className="mt-1 text-slate-300 bg-bgInput border border-white/5 rounded-xl p-3">
+                      {matchedCustomer.notes}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center text-center p-14 bg-bgCard border border-dashed border-white/10 rounded-3xl gap-3">
+              <p className="text-4xl opacity-40">👆</p>
+              <h3 className="text-lg font-bold text-slate-300">No profile loaded</h3>
+              <p className="text-sm text-slate-500 max-w-xs">
+                Identify a finger or enroll a customer. Data is loaded from MongoDB only after a
+                match.
+              </p>
+            </div>
+          )}
         </section>
-
-        {/* Section 3: MATCH DISPLAYED RESULT */}
-        {matchedProfile && (
-          <section className="rounded-2xl border-2 border-green-500 bg-green-50/50 p-6 shadow-md">
-            <div className="flex items-center justify-between border-b border-green-200 pb-3 mb-4">
-              <h2 className="text-xl font-bold text-green-900">User Profile Matched!</h2>
-              <span className="rounded-full bg-green-200 px-3 py-1 text-xs font-bold text-green-800">
-                Score: {matchResult?.score ?? "N/A"}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-slate-800">
-              <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">User ID</span>
-                <p className="font-semibold text-base text-slate-900">{matchedProfile.subjectId}</p>
-              </div>
-
-              <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">Full Name</span>
-                <p className="font-semibold text-base text-slate-900">{matchedProfile.fullName}</p>
-              </div>
-
-              <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">Phone</span>
-                <p className="font-medium">{matchedProfile.phone || "Not provided"}</p>
-              </div>
-
-              <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">Email</span>
-                <p className="font-medium">{matchedProfile.email || "Not provided"}</p>
-              </div>
-
-              <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">
-                  Nationality
-                </span>
-                <p className="font-medium">{matchedProfile.nationality || "Not provided"}</p>
-              </div>
-
-              <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">Address</span>
-                <p className="font-medium">{matchedProfile.address || "Not provided"}</p>
-              </div>
-
-              <div className="md:col-span-2">
-                <span className="text-xs text-slate-500 uppercase font-bold block">
-                  Notes / Description
-                </span>
-                <p className="font-medium bg-white p-3 rounded-lg border border-slate-200 mt-1">
-                  {matchedProfile.notes || "No notes available."}
-                </p>
-              </div>
-
-              <div>
-                <span className="text-xs text-slate-500 uppercase font-bold block">
-                  Enrolled Date
-                </span>
-                <p className="text-xs text-slate-600">{formatDate(matchedProfile.enrolledAt)}</p>
-              </div>
-
-              <div>
-                <span className="text-xs text-slate-600 uppercase font-bold block">
-                  Last Scanned Date
-                </span>
-                <p className="text-xs text-slate-600">
-                  {formatDate(matchedProfile.lastIdentifiedAt)}
-                </p>
-              </div>
-            </div>
-          </section>
-        )}
-      </div>
-    </main>
+      </main>
+    </>
   );
 }
